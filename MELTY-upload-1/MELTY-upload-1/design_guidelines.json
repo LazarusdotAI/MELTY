@@ -1,0 +1,129 @@
+{
+  "project_name": "MELTY AI Game Fusion Workspace",
+  "archetype": "Electric & Neon Cyber-IDE (Tactical Dark Mode)",
+  "context_type": "Creative SaaS App / Game Engine Workspace",
+  "theme": "Dark",
+  "typography": {
+    "heading_font": "Outfit, sans-serif",
+    "body_font": "Plus Jakarta Sans, sans-serif",
+    "code_font": "JetBrains Mono, monospace",
+    "font_weights": {
+      "display": "800",
+      "heading": "700",
+      "subheading": "600",
+      "body": "400",
+      "mono": "500"
+    },
+    "hierarchy": {
+      "h1_hero": "text-4xl md:text-5xl lg:text-6xl font-extrabold tracking-tight",
+      "h2_section": "text-2xl md:text-3xl font-bold tracking-tight",
+      "h3_card": "text-lg md:text-xl font-semibold",
+      "body_main": "text-sm md:text-base leading-relaxed",
+      "code_snippet": "font-mono text-xs md:text-sm tracking-normal"
+    }
+  },
+  "colors": {
+    "background_base": "#08090d",
+    "background_surface": "#0f1118",
+    "background_elevated": "#171a24",
+    "background_overlay": "rgba(15, 17, 24, 0.85)",
+    "primary_neon_cyan": "#06b6d4",
+    "primary_cyan_hover": "#22d3ee",
+    "secondary_violet": "#a855f7",
+    "accent_amber": "#f59e0b",
+    "accent_emerald": "#10b981",
+    "destructive_rose": "#f43f5e",
+    "text_primary": "#f8fafc",
+    "text_secondary": "#94a3b8",
+    "text_muted": "#64748b",
+    "border_subtle": "#1e293b",
+    "border_glow": "rgba(6, 182, 212, 0.4)",
+    "glow_cyan": "shadow-[0_0_20px_rgba(6,182,212,0.25)]",
+    "glow_violet": "shadow-[0_0_20px_rgba(168,85,247,0.25)]"
+  },
+  "visual_enhancers": {
+    "glassmorphism": "backdrop-blur-xl bg-[#0f1118]/80 border border-slate-800/80 shadow-2xl",
+    "cyber_border": "border border-cyan-500/30 hover:border-cyan-400/70 transition-colors",
+    "active_card_glow": "ring-1 ring-cyan-500/50 shadow-[0_0_15px_rgba(6,182,212,0.2)]",
+    "code_editor_style": "bg-[#0a0b0e] border border-slate-800 rounded-lg font-mono text-cyan-300 p-4"
+  },
+  "component_path": "/app/frontend/src/components/",
+  "instructions_to_main_agent": [
+    "Build a complete, fully interactive, dark workspace web application inspired by MELTY.",
+    "The primary AI model must be clearly labeled as 'Kimi K3' across the prompt bar, chat panel, and token cost metrics.",
+    "Provide top workspace mode tabs: 'Project Library', 'Fusion Studio' (Main Editor), 'Asset Vault', 'Code & File Tree', and 'Budget & Analytics'.",
+    "In the Fusion Studio, create a multi-column responsive workspace with: 1) Left panel for Reference Cards + Aspect Toggles + Blend Slider + PC Import Helper CTA, 2) Central Playable Preview iframe/canvas (toggleable 2D Phaser & 3D Three.js live minigames with playable controls WASD/Arrows), 3) Right panel tabs for AI Chat (Kimi K3 prompt stream), Live Game-Design Summary (GDD specs auto-generated), Code Editor, and Version History Checkpoints.",
+    "Implement the 'Import games from my PC' helper modal with copyable CLI script ('npx melty-pc-scan --json'), drag-and-drop local JSON upload area, and sample game detection results.",
+    "Ensure the Budget Meter prominently shows the $9.00 daily spend ceiling, real-time Kimi K3 token burn, spend breakdown per generation, and alert thresholds.",
+    "Include functional Export Zip downloading simulation (generates downloadable game bundle file) and Share Link modal with copyable public URL & QR code preview.",
+    "All interactive elements (buttons, inputs, sliders, cards, tabs, modals) MUST include explicit data-testid attributes (e.g. data-testid='blend-slider', data-testid='kimi-k3-send-button')."
+  ],
+  "UNIVERSAL GUIDELINES FOR MAIN AGENT": [
+    "Avoid AI slop: do NOT use standard white/light grey boxes or plain Inter font for headings. Use Outfit font with electric cyan and hyper violet accent strokes.",
+    "DO NOT use transparent backgrounds on dropdown menus, headers, or overlays. Always use high contrast dark surfaces like bg-[#0f1118] with backdrop-blur-xl.",
+    "DO NOT center-align main app text. Maintain left-aligned, high-density IDE hierarchy.",
+    "Ensure all buttons have hover/active states with glowing transitions and data-testid attributes.",
+    "Include real playable interactive 2D (HTML Canvas / Phaser logic) and 3D (Three.js canvas scene) renderers inside the iframe container so users can physically play the generated games in real-time."
+  ],
+  "image_urls": {
+    "game_references": [
+      {
+        "url": "https://images.unsplash.com/photo-1684536689765-c4ebf55da2ae?crop=entropy&cs=srgb&fm=jpg&ixid=M3w3NTY2NzV8MHwxfHNlYXJjaHwzfHxyZXRybyUyMHZpZGVvJTIwZ2FtZSUyMHBpeGVsJTIwYXJ0JTIwY3liZXJwdW5rJTIwcGl4ZWwlMjBwb3N0ZXJ8ZW58MHx8fHwxNzkyMzcyOTMzfDA&ixlib=rb-4.1.0&q=85",
+        "title": "Cyber City Neon Run",
+        "genre": "Cyberpunk Platformer",
+        "aspects": ["Atmosphere", "Visual Style"]
+      },
+      {
+        "url": "https://images.pexels.com/photos/37694203/pexels-photo-37694203.jpeg?auto=compress&cs=tinysrgb&dpr=2&h=650&w=940",
+        "title": "Astra Galaxian",
+        "genre": "Retro Arcade Shooter",
+        "aspects": ["Mechanics", "Progression"]
+      },
+      {
+        "url": "https://images.unsplash.com/photo-1640903581708-8d491706515b?crop=entropy&cs=srgb&fm=jpg&ixid=M3w4NjA1Mjh8MHwxfHNlYXJjaHwyfHx2aWRlbyUyMGdhbWUlMjBjb25jZXB0JTIwYXJ0JTIwd2FsbHBhcGVyJTIwZGFyayUyMHNjaS1maSUyMGZhbnRhc3l8ZW58MHx8fHwxNzkyMzcyOTM5fDA&ixlib=rb-4.1.0&q=85",
+        "title": "Abyssal Sentinel",
+        "genre": "Dark Fantasy Action RPG",
+        "aspects": ["World Structure", "Atmosphere"]
+      },
+      {
+        "url": "https://images.pexels.com/photos/18545023/pexels-photo-18545023.jpeg?auto=compress&cs=tinysrgb&dpr=2&h=650&w=940",
+        "title": "Vector Matrix 3D",
+        "genre": "Low-Poly 3D Runner",
+        "aspects": ["Mechanics", "Visual Style"]
+      }
+    ],
+    "game_thumbnails": [
+      {
+        "url": "https://images.pexels.com/photos/7688762/pexels-photo-7688762.jpeg?auto=compress&cs=tinysrgb&dpr=2&h=650&w=940",
+        "name": "Project: Neon Hades",
+        "engine": "2D Phaser Engine"
+      },
+      {
+        "url": "https://images.unsplash.com/photo-1705510144116-cc4d88838b14?crop=entropy&cs=srgb&fm=jpg&ixid=M3w3NTY2NzV8MHwxfHNlYXJjaHwyfHxyZXRybyUyMHZpZGVvJTIwZ2FtZSUyMHBpeGVsJTIwYXJ0JTIwY3liZXJwdW5rJTIwcGl4ZWwlMjBwb3N0ZXJ8ZW58MHx8fHwxNzkyMzcyOTMzfDA&ixlib=rb-4.1.0&q=85",
+        "name": "Project: Chrono Mesh",
+        "engine": "3D Three.js Engine"
+      }
+    ]
+  },
+  "grids": {
+    "workspace_layout": "grid grid-cols-1 lg:grid-cols-12 gap-4 h-[calc(100vh-4rem)] p-4",
+    "left_sidebar_span": "col-span-12 lg:col-span-3 flex flex-col gap-4 overflow-y-auto",
+    "center_preview_span": "col-span-12 lg:col-span-6 flex flex-col gap-3 h-full",
+    "right_panel_span": "col-span-12 lg:col-span-3 flex flex-col gap-4 h-full overflow-hidden",
+    "project_grid": "grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-6 p-6"
+  },
+  "motion": {
+    "blend_slider_anim": "transition-all duration-300 ease-out",
+    "preview_switch": "transition-opacity duration-200 ease-in-out",
+    "button_press": "active:scale-95 transition-transform"
+  },
+  "accessibility": {
+    "focus_rings": "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-400 focus-visible:ring-offset-2 focus-visible:ring-offset-slate-950",
+    "aria_roles": "Ensure sliders use role='slider', tabs use role='tablist', and buttons include readable title/aria-label.",
+    "contrast_ratio": "Text colors guarantee WCAG AA 4.5:1 against dark surface #0f1118."
+  },
+  "3d_libraries": {
+    "three_js": "Use Three.js (installed/imported) for 3D interactive preview canvas.",
+    "phaser_2d": "Use HTML5 Canvas element with interactive game loops for 2D game preview."
+  }
+}
