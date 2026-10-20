@@ -37,7 +37,7 @@ def cw_dir(tmp_path):
 
 
 def test_version_and_alias(comp):
-    assert comp.VERSION == "0.5.0"
+    assert comp.VERSION == "0.5.2"
     for n in ("Call of Duty®: Black Ops Cold War", "Black Ops Cold War™", "COD Cold War"):
         assert comp.is_cold_war({"name": n})
     assert not comp.is_cold_war({"name": "Cold War", "exe": "coldwar.exe"})

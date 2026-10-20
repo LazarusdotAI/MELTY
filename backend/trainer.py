@@ -36,8 +36,11 @@ PROFILES = {
 LUA = r'''-- MELTY Trainer (generated). Reads settings.json live, writes status.json with what the game reports back.
 local S, applied, mods, last, rev = {}, {}, {}, 0, -1
 local ST = { features = {}, loaded = os.time() }
-local NAME = CName.new("MeltyTrainer")
-local function mark(k, ok, info) ST.features[k] = { ok = ok, info = tostring(info or "") } end
+-- Game types (CName, Game, ...) don't exist yet while CET loads this file; NAME is created in onInit.
+local NAME = nil
+-- ok = the command ran without a Lua error; verified = the game's own state was read back and matches the request
+-- (true/false), or nil when the game can't report it. Only verified == true may be shown as Active.
+local function mark(k, ok, info, verified) ST.features[k] = { ok = ok, info = tostring(info or ""), verified = verified } end
 local function readSettings()
   local f = io.open("settings.json", "r"); if not f then return end
   local t = f:read("*a"); f:close()
@@ -52,34 +55,68 @@ local function val(k, d) return (S.features and S.features[k] and tonumber(S.fea
 local function statMult(p, k, stype, m)
   local ss, id = Game.GetStatsSystem(), p:GetEntityID()
   if mods[k] then ss:RemoveModifier(id, mods[k]); mods[k] = nil end
+  local before = ss:GetStatValue(id, stype)
   if m and m ~= 1 then mods[k] = RPGManager.CreateStatModifier(stype, gameStatModifierType.Multiplier, m); ss:AddModifier(id, mods[k]) end
-  return ss:GetStatValue(id, stype)
+  return before, ss:GetStatValue(id, stype)
+end
+local function statFeature(p, k, key, stype, label)
+  local m = on(key) and val(key, 1) or 1
+  local before, after = statMult(p, k, stype, m)
+  -- proven only if the game's own stat moved at least halfway to the requested multiple
+  local verified = (m == 1) or (before > 0 and after >= before + before * (m - 1) * 0.5)
+  return label .. "=" .. tostring(after) .. " (was " .. tostring(before) .. ", x" .. tostring(m) .. ")", verified
 end
 local function apply(p)
+  NAME = NAME or CName.new("MeltyTrainer")
   local id = p:GetEntityID()
-  local function try(k, fn) local ok, info = pcall(fn); mark(k, ok, info) end
+  local function try(k, fn)
+    local ok, info, verified = pcall(fn)
+    if not ok then verified = nil end
+    mark(k, ok, info, verified)
+  end
   try("god_mode", function()
-    local gm = Game.GetGodModeSystem()
-    if on("god_mode") then gm:AddGodMode(id, gameGodModeType.Invulnerable, NAME) else gm:RemoveGodMode(id, gameGodModeType.Invulnerable, NAME) end
-    return "invulnerable=" .. tostring(gm:HasGodMode(id, gameGodModeType.Invulnerable))
+    local gm, want = Game.GetGodModeSystem(), on("god_mode") and true or false
+    if want then gm:AddGodMode(id, gameGodModeType.Invulnerable, NAME) else gm:RemoveGodMode(id, gameGodModeType.Invulnerable, NAME) end
+    local has = gm:HasGodMode(id, gameGodModeType.Invulnerable) and true or false
+    return "invulnerable=" .. tostring(has), has == want
   end)
-  try("super_speed", function() return "MaxSpeed=" .. statMult(p, "speed", gamedataStatType.MaxSpeed, on("super_speed") and val("super_speed", 1) or 1) end)
-  try("super_jump", function() return "JumpHeight=" .. statMult(p, "jump", gamedataStatType.JumpHeight, on("super_jump") and val("super_jump", 1) or 1) end)
+  try("super_speed", function() return statFeature(p, "speed", "super_speed", gamedataStatType.MaxSpeed, "MaxSpeed") end)
+  try("super_jump", function() return statFeature(p, "jump", "super_jump", gamedataStatType.JumpHeight, "JumpHeight") end)
   try("bullet_time", function()
     local ts = Game.GetTimeSystem()
-    if on("bullet_time") and val("bullet_time", 1) < 1 then ts:SetTimeDilation(NAME, val("bullet_time", 1)) else ts:UnsetTimeDilation(NAME) end
-    return "dilation_active=" .. tostring(ts:IsTimeDilationActive())
+    local want = (on("bullet_time") and val("bullet_time", 1) < 1) and true or false
+    if want then ts:SetTimeDilation(NAME, val("bullet_time", 1)) else ts:UnsetTimeDilation(NAME) end
+    local active = ts:IsTimeDilationActive() and true or false
+    return "dilation_active=" .. tostring(active), active == want
   end)
-  if on("time_of_day") then try("time_of_day", function() Game.GetTimeSystem():SetGameTimeByHMS(math.floor(val("time_of_day", 12)), 0, 0); return "hour set" end) end
+  if on("time_of_day") then try("time_of_day", function()
+    local ts, h = Game.GetTimeSystem(), math.floor(val("time_of_day", 12))
+    ts:SetGameTimeByHMS(h, 0, 0)
+    local okh, cur = pcall(function() return ts:GetGameTime():Hours() end)
+    if okh and type(cur) == "number" then return "hour=" .. tostring(cur), cur == h end
+    return "hour set (the game didn't report the time back)", nil
+  end) end
   if on("weather") and S.features.weather.value and S.features.weather.value ~= "" then
-    try("weather", function() Game.GetWeatherSystem():SetWeather(CName.new(S.features.weather.value), 10, 0); return S.features.weather.value end)
+    try("weather", function()
+      Game.GetWeatherSystem():SetWeather(CName.new(S.features.weather.value), 10, 0)
+      return S.features.weather.value .. " requested (weather fades in, so it can't be read back yet)", nil
+    end)
   end
 end
-registerForEvent("onInit", function() spdlog.info("MELTY_READY MeltyTrainer"); readSettings(); writeStatus() end)
+-- Touching the player or game systems on the main menu crashes the game (seen 2026-10-19: every launch crashed
+-- 1 s after onInit). Only act once the player is attached to a loaded save, plus a few seconds to settle.
+local attached, attachedFor = false, 0
+registerForEvent("onInit", function()
+  NAME = CName.new("MeltyTrainer")
+  Observe("PlayerPuppet", "OnGameAttached", function() attached, attachedFor = true, 0 end)
+  Observe("PlayerPuppet", "OnDetach", function() attached, attachedFor, rev, mods = false, 0, -1, {} end)  -- re-apply on the next save
+  spdlog.info("MELTY_READY MeltyTrainer"); readSettings(); writeStatus()
+end)
 registerForEvent("onUpdate", function(dt)
+  if attached then attachedFor = attachedFor + dt end
   last = last + dt; if last < 1 then return end; last = 0
   readSettings()
-  local p = Game.GetPlayer()
+  local p = (attached and attachedFor >= 3) and Game.GetPlayer() or nil
   ST.in_game = p ~= nil
   if p and S.rev and S.rev ~= rev then
     rev = S.rev
@@ -115,16 +152,25 @@ def feature_state(f, prof, tool_ok, installed, status, saved):
     if not installed:
         return "Install First", "Install the trainer into the game first"
     on = ((saved or {}).get(f["key"]) or {}).get("on")
+    if status and status.get("load_error"):
+        return "Broken", f"The trainer didn't start in the game: {status['load_error'][:200]}"
     fresh = bool(status and status.get("rev") == (saved or {}).get("__rev") and status.get("in_game"))
     rep = ((status or {}).get("features") or {}).get(f["key"]) if fresh else None
     if status and not status.get("loaded"):
         return "Requires Restart", "Start (or restart) the game so it loads the trainer"
     if not on:
         return "Available", None
+    if status and status.get("runtime_error"):
+        return "Broken", f"The trainer hit an error in the game: {status['runtime_error'][:200]}"
     if rep and rep.get("ok") is False:
         return "Broken", f"The game rejected it: {rep.get('info', '')[:160]}"
     if rep and rep.get("ok"):
-        return "Active", rep.get("info")
+        # A command that ran without error isn't proof: only the game's own read-back can make it Active.
+        if rep.get("verified") is True:
+            return "Active", rep.get("info")
+        if rep.get("verified") is False:
+            return "Broken", f"The game took the command but the effect isn't on: {rep.get('info', '')[:160]}"
+        return "Needs Testing", f"Sent, but the game can't report this one back. Check it yourself in game ({rep.get('info', '')[:120]})"
     if on:
         return "Needs Testing", "Sent — waiting for the game to confirm (load a save)"
     return "Available", None

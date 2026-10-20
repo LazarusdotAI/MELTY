@@ -27,7 +27,7 @@ import glob
 import urllib.request
 import urllib.error
 
-VERSION = "0.5.1"
+VERSION = "0.5.2"
 ASSET_OPS = ["asset_scan", "asset_list", "asset_extract", "asset_convert", "asset_validate", "asset_package",
              "asset_test_package", "asset_install", "asset_cleanup", "setup_tools", "detect_tools", "trainer_install", "trainer_apply", "trainer_status"]
 ALL_OPS = ["doctor", "detect_games", "inspect_game", "build_mod", "test_mod", "install_package", "uninstall_package",
@@ -576,10 +576,60 @@ def install_zip(jr, data):
                 jr.write(n, z.read(n))
 
 
+def expected_toolchain(g, tc):
+    """The game decides the toolchain. Cyberpunk (REDengine 4) only loads Cyber Engine Tweaks Lua mods, so a CET
+    project must never fall through to the UE4SS or BepInEx paths (that produced Scripts/ + enabled.txt folders
+    CET ignores, and a BepInEx install inside the Cyberpunk folder)."""
+    if g.get("engine") == "redengine4":
+        if tc and tc != "cet-lua":
+            raise RuntimeError(f"{g['name']} only loads Cyber Engine Tweaks (cet-lua) mods, but this job asked for '{tc}'. "
+                               "Rebuild the project in MELTY so it uses the CET toolchain.")
+        return "cet-lua"
+    return tc or "bepinex5-csharp"
+
+
+def cet_layout_errors(names, slug=None):
+    """CET loads mods/<name>/init.lua and silently ignores a folder without a root init.lua."""
+    files = [n.replace("\\", "/") for n in names if not n.endswith("/")]
+    tops = sorted({n.split("/")[0] for n in files})
+    if len(tops) != 1 or not all("/" in n for n in files):
+        return [f"the package must contain exactly one mod folder, found {tops or 'nothing'}"]
+    top, errors = tops[0], []
+    if slug and top.lower() != slug.lower():
+        errors.append(f"mod folder is '{top}', expected '{slug}'")
+    if f"{top}/init.lua" not in files:
+        nested = [n for n in files if n.endswith("/init.lua")]
+        errors.append(f"{top}/init.lua is missing" + (f" (found {nested[0]}; CET needs it at the top of the mod folder)" if nested else ""))
+    if f"{top}/enabled.txt" in files:
+        errors.append("enabled.txt is a UE4SS marker; this package was made by the UE4SS packager, not the CET one")
+    return errors
+
+
+def prior_installs(m, root):
+    """Journals that still own files for this same package in this same folder (older install or interrupted test)."""
+    pid, name = (m.get("id") or "").lower(), m.get("name")
+    want = os.path.normcase(os.path.realpath(root))
+    out = []
+    for f in sorted(os.listdir(journals())):
+        if not f.endswith(".json"):
+            continue
+        try:
+            j = json.load(open(os.path.join(journals(), f), encoding="utf-8"))
+        except Exception:
+            continue
+        if j.get("status") != "installed" or os.path.normcase(os.path.realpath(j.get("host_dir") or "")) != want:
+            continue
+        jn = (j.get("name") or "")
+        if (pid and (j.get("package_id") or "").lower() == pid) or (name and jn == name) or (pid and jn.lower() == "dev-test " + pid):
+            out.append(j["install_id"])
+    return out
+
+
 def install_package(p, _job):
     m = p["manifest"]
     g = find_game(m["host"]["game"])
     require_supported_host(g)
+    tc = expected_toolchain(g, m.get("toolchain"))
     warnings = []
     sv = m["host"].get("supported_versions") or []
     if sv and g.get("game_version") not in sv:
@@ -590,21 +640,41 @@ def install_package(p, _job):
         except RuntimeError:
             warnings.append(f"Secondary game {s['game']} not found — crossover content will be missing")
     root = install_root(g, m.get("install_root", "{host}"), m.get("docs"))
+    # Download and check everything first, so a bad or stale release never removes the copy that's already there.
+    deps = []
+    for dep in m.get("dependencies", []):
+        if dep.get("name") == "BepInEx" and os.path.exists(os.path.join(g["install_dir"], "BepInEx", "core", "BepInEx.dll")):
+            continue
+        if dep.get("name") == "UE4SS" and (os.path.exists(os.path.join(root, "UE4SS.dll")) or os.path.exists(os.path.join(root, "ue4ss", "UE4SS.dll"))):
+            continue
+        data = bepinex_zip(dep.get("sha256")) if dep.get("name") == "BepInEx" else download_url(dep["url"])
+        if dep.get("sha256") and sha256(data) != dep["sha256"]:
+            raise RuntimeError(f"Checksum mismatch for {dep['name']}")
+        deps.append(data)
+    payload = []
+    for f in m["files"]:
+        data = http("GET", "/api/companion/download?path=" + urllib.request.quote(f["storage_path"]), raw=True, timeout=180)
+        if sha256(data) != f["sha256"]:
+            raise RuntimeError(f"Checksum mismatch for {f['path']}")
+        if f.get("kind") == "zip" and tc == "cet-lua":
+            with zipfile.ZipFile(__import__("io").BytesIO(data)) as z:
+                errs = cet_layout_errors(z.namelist(), m.get("id"))
+            if errs:
+                raise RuntimeError("This release can't load in Cyber Engine Tweaks: " + "; ".join(errs) + ". Rebuild it in MELTY, then install again.")
+        payload.append((f, data))
+    # Reinstall: put back the previous copy of this same package first, otherwise every write is a file conflict.
+    replaced = []
+    for old in prior_installs(m, root):
+        restore_journal(old)
+        replaced.append(old)
+    if replaced:
+        warnings.append("Removed the previously installed copy first")
     jr = Journal(root, m["name"])
+    jr.j["package_id"] = m.get("id")
     try:
-        for dep in m.get("dependencies", []):
-            if dep.get("name") == "BepInEx" and os.path.exists(os.path.join(g["install_dir"], "BepInEx", "core", "BepInEx.dll")):
-                continue
-            if dep.get("name") == "UE4SS" and (os.path.exists(os.path.join(root, "UE4SS.dll")) or os.path.exists(os.path.join(root, "ue4ss", "UE4SS.dll"))):
-                continue
-            data = bepinex_zip(dep.get("sha256")) if dep.get("name") == "BepInEx" else download_url(dep["url"])
-            if dep.get("sha256") and sha256(data) != dep["sha256"]:
-                raise RuntimeError(f"Checksum mismatch for {dep['name']}")
+        for data in deps:
             install_zip(jr, data)
-        for f in m["files"]:
-            data = http("GET", "/api/companion/download?path=" + urllib.request.quote(f["storage_path"]), raw=True, timeout=180)
-            if sha256(data) != f["sha256"]:
-                raise RuntimeError(f"Checksum mismatch for {f['path']}")
+        for f, data in payload:
             if f.get("kind") == "zip":
                 with zipfile.ZipFile(__import__("io").BytesIO(data)) as z:
                     for n in z.namelist():
@@ -618,7 +688,7 @@ def install_package(p, _job):
         restore_journal(jr.j["install_id"])
         raise
     e = jr.j["entries"]
-    return {"install_id": jr.j["install_id"], "host_dir": root, "warnings": warnings,
+    return {"install_id": jr.j["install_id"], "host_dir": root, "warnings": warnings, "replaced_installs": replaced,
             "created": sum(1 for x in e if x["action"] == "created"),
             "replaced": sum(1 for x in e if x["action"] == "replaced")}, "\n".join(warnings)
 
@@ -708,31 +778,45 @@ def player_log(g):
     return os.path.join(os.path.expanduser("~"), "AppData", "LocalLow", g["company"], g["product"], "Player.log")
 
 
+def find_ci(folder, name):
+    """Case-insensitive child lookup (CET names a mod's log after its folder)."""
+    try:
+        return next((os.path.join(folder, n) for n in os.listdir(folder) if n.lower() == name.lower()), None)
+    except OSError:
+        return None
+
+
 def collect_logs(p, job):
+    """Read only the selected mod's evidence: other mods' MELTY_READY / MELTY_CHECK lines must never confirm it."""
     g = find_game(p.get("host_name") or p.get("name"))
-    bl = tail(os.path.join(g["install_dir"], "BepInEx", "LogOutput.log"))
-    pl = tail(player_log(g))
-    if bl:
-        upload(job["id"], "LogOutput.log", bl.encode())
-    if pl:
-        upload(job["id"], "Player.log", pl.encode())
-    root = install_root(g, "{exe_dir}") if g.get("exe") else g["install_dir"]
-    extra = ""
-    for lp in [os.path.join(root, "UE4SS.log"), os.path.join(root, "ue4ss", "UE4SS.log")] + \
-            glob.glob(os.path.join(g["install_dir"], "bin", "x64", "plugins", "cyber_engine_tweaks", "mods", "*", "*.log")):
-        t = tail(lp)
-        if "MELTY_READY" in t:
-            t = t[t.rfind("MELTY_READY"):]
-        if t:
-            extra += t
-            upload(job["id"], os.path.basename(lp), t.encode())
-    text = bl[bl.rfind("MELTY_READY"):] if "MELTY_READY" in bl else bl
-    text += "\n" + extra
+    tc = p.get("toolchain") or ("cet-lua" if g.get("engine") == "redengine4" else "bepinex5-csharp")
+    slug = p.get("slug") or ""
+    bl = pl = ""
+    if tc == "cet-lua":
+        d = find_ci(cet_mods_dir(g), slug) if slug else None
+        lp = find_ci(d, slug + ".log") if d else None
+        raw, source = (tail(lp) if lp else ""), (os.path.basename(lp) if lp else None)
+        text = raw[raw.rfind("MELTY_READY"):] if "MELTY_READY" in raw else ""  # this mod's own log: last session only
+    elif tc == "ue4ss-lua":
+        root = install_root(g, "{exe_dir}")
+        lp = next((x for x in (os.path.join(root, "UE4SS.log"), os.path.join(root, "ue4ss", "UE4SS.log")) if os.path.exists(x)), None)
+        raw, source = (tail(lp) if lp else ""), (os.path.basename(lp) if lp else None)
+        marker = f"MELTY_READY {slug}"
+        text = raw[raw.rfind(marker):] if slug and marker in raw else ""  # shared log: only after this mod's own ready line
+    else:
+        bl = tail(os.path.join(g["install_dir"], "BepInEx", "LogOutput.log"))
+        pl = tail(player_log(g))
+        if pl:
+            upload(job["id"], "Player.log", pl.encode())
+        raw, source = bl, "LogOutput.log"
+        text = bl[bl.rfind("MELTY_READY"):] if "MELTY_READY" in bl else ""
+    if raw:
+        upload(job["id"], source, raw[-200000:].encode())
     checks = {}
     for m in re.findall(r"MELTY_CHECK (\S+) (PASS|FAIL) ?([^\r\n]*)", text):
         checks[m[0]] = {"name": m[0], "pass": m[1] == "PASS", "detail": m[2].strip()}
-    return {"bepinex_log_tail": bl[-6000:], "player_log_tail": pl[-4000:], "log_tail": (bl + extra)[-8000:],
-            "mod_loaded": "MELTY_READY" in text, "checks": list(checks.values())}, ""
+    return {"bepinex_log_tail": bl[-6000:], "player_log_tail": pl[-4000:], "log_tail": raw[-8000:], "log_source": source,
+            "mod_loaded": bool(text), "checks": list(checks.values())}, ""
 
 
 def screenshot_bytes():
@@ -893,7 +977,7 @@ def test_lua(p, job, g):
 def build_mod(p, job):
     g = find_game(p["host_name"])
     require_supported_host(g)
-    tc = p.get("toolchain", "bepinex5-csharp")
+    tc = expected_toolchain(g, p.get("toolchain"))
     if tc != "bepinex5-csharp":
         g = find_game(p["host_name"])
         return build_ue3(p, job, g) if tc == "ue3-unrealscript" else build_cet(p, job, g) if tc == "cet-lua" else build_lua(p, job, g)
@@ -935,7 +1019,7 @@ def build_mod(p, job):
 def test_mod(p, job):
     g = find_game(p["host_name"])
     require_supported_host(g)
-    tc = p.get("toolchain", "bepinex5-csharp")
+    tc = expected_toolchain(g, p.get("toolchain"))
     if tc == "cet-lua":
         return test_cet(p, job, g)
     if tc == "ue3-unrealscript":
@@ -1210,7 +1294,11 @@ def trainer_dir(p):
 
 def trainer_install(p, _job):
     d, rel, full = trainer_dir(p)
+    for old in prior_installs({"name": "MELTY trainer"}, d):  # updating the trainer replaces the old copy
+        restore_journal(old)
     jr = Journal(d, "MELTY trainer")
+    lp = trainer_log(full)
+    jr.j["log_offset"] = os.path.getsize(lp) if os.path.exists(lp) else 0  # older errors belong to the old trainer
     try:
         for name, content in p["files"].items():
             jr.write(f"{rel}/{name}", content.encode())
@@ -1257,7 +1345,37 @@ def trainer_status(p, _job):
     if st and (running is False or st.get("age_s", 0) > 10):
         st["loaded"] = 0 if running is False else st.get("loaded")
         st["in_game"] = False
+    err = trainer_log_errors(p, full)
+    if err:
+        st = {**(st or {"loaded": 0, "in_game": False}), **err}
     return {"install_dir": p["install_dir"], "status": st, "game_running": running}, "status read"
+
+
+def trainer_log(full):
+    return os.path.join(full, os.path.basename(full.rstrip("\\/")) + ".log")  # CET logs each mod to <mod>/<mod>.log
+
+
+def trainer_log_errors(p, full):
+    """What CET recorded for the current trainer install: a load error (it never reached onInit) or a runtime error."""
+    d = known_game_dir(p)
+    ids = prior_installs({"name": "MELTY trainer"}, d)
+    if not ids:
+        return {}
+    js = [json.load(open(os.path.join(journals(), i + ".json"), encoding="utf-8")) for i in ids]
+    j = max(js, key=lambda x: x.get("created_at", 0))
+    lp = trainer_log(full)
+    if not os.path.exists(lp):
+        return {}
+    off = j.get("log_offset", 0)
+    with open(lp, "rb") as f:
+        f.seek(off if os.path.getsize(lp) >= off else 0)  # a shorter log means CET started a new one
+        text = f.read()[-200000:].decode("utf-8", "ignore")
+    ready = text.rfind("MELTY_READY")
+    after = text[ready:] if ready >= 0 else text
+    errors = [l.strip() for l in after.splitlines() if re.search(r"\berror\b", l, re.I) and "MELTY_CHECK" not in l]
+    if not errors:
+        return {}
+    return {"runtime_error": errors[-1][:300]} if ready >= 0 else {"load_error": errors[-1][:300]}
 
 
 def cet_mods_dir(g):
@@ -1266,13 +1384,15 @@ def cet_mods_dir(g):
 
 def build_cet(p, job, g):
     files = [f for f in p["files"] if f["path"].endswith(".lua")]
-    if not any(os.path.basename(f["path"]) == "init.lua" for f in files):
-        return {"ok": False, "errors": ["init.lua is missing"]}, ""
+    names = [f"{p['slug']}/{f['path'].replace(chr(92), '/').lstrip('/')}" for f in files]
+    errors = cet_layout_errors(names, p["slug"])
+    if errors:
+        return {"ok": False, "errors": errors}, "CET package layout check failed:\n" + "\n".join(errors)
     import io as _io
     buf = _io.BytesIO()
     with zipfile.ZipFile(buf, "w") as z:
-        for f in files:
-            z.writestr(f"{p['slug']}/{f['path'].replace(chr(92), '/').lstrip('/')}", f["content"])
+        for n, f in zip(names, files):
+            z.writestr(n, f["content"])
     upload(job["id"], p["slug"] + ".zip", buf.getvalue())
     return {"ok": True, "errors": [], "warnings": [], "note": "Lua is checked when the game loads it (no compile step)"}, "packaged CET Lua mod"
 
@@ -1285,6 +1405,10 @@ def test_cet(p, job, g):
     res = {"installed": False, "launched": False, "plugin_loaded": False, "plugin_errors": [], "checks": [], "restored": False,
            "game_version": g.get("game_version"), "alive_at_end": False}
     pkg = http("GET", "/api/companion/download?path=" + urllib.request.quote(p["dll"]["storage_path"]), raw=True, timeout=180)
+    with zipfile.ZipFile(__import__("io").BytesIO(pkg)) as z:
+        errs = cet_layout_errors(z.namelist(), p["slug"])
+    if errs:
+        raise RuntimeError("This build can't load in Cyber Engine Tweaks: " + "; ".join(errs) + ". Build again.")
     jr = Journal(g["install_dir"], "dev-test " + p["slug"])
     try:
         rel = os.path.relpath(mods, g["install_dir"]).replace(os.sep, "/")
@@ -1323,8 +1447,29 @@ HANDLERS = {n: globals()[n] for n in ALL_OPS}
 
 
 # ---------------- main loop ----------------
+LEADER_PATH = os.path.join(CFG_DIR, "companion.leader")
+
+
+def claim_leadership():
+    """Only one companion may serve this PC. The newest one started wins; older ones notice and exit.
+    Several running at once split jobs between different code versions and break install -> launch."""
+    os.makedirs(CFG_DIR, exist_ok=True)
+    tmp = LEADER_PATH + f".{os.getpid()}.tmp"
+    json.dump({"pid": os.getpid(), "version": VERSION, "started": time.time()}, open(tmp, "w", encoding="utf-8"))
+    os.replace(tmp, LEADER_PATH)
+
+
+def is_leader():
+    try:
+        return json.load(open(LEADER_PATH, encoding="utf-8")).get("pid") == os.getpid()
+    except FileNotFoundError:
+        return False
+    except Exception:
+        return True  # file mid-write by a newer instance; check again on the next poll
+
+
 def heartbeat_loop():
-    while True:
+    while is_leader():
         try:
             http("POST", "/api/companion/heartbeat", {"status": {"version": VERSION, "dotnet": dotnet_version(),
                                                                 "running_games": len(PROCS), "python": sys.version.split()[0]}})
@@ -1334,7 +1479,7 @@ def heartbeat_loop():
 
 
 def scan_loop():
-    while True:
+    while is_leader():
         try:
             res, _ = detect_games({}, None)
             http("POST", "/api/companion/games", {"games": res["games"]}, timeout=120)
@@ -1364,6 +1509,7 @@ def run():
     if not CFG.get("token"):
         sys.exit("Not paired. Run: python melty_companion.py pair <APP_URL> <CODE>")
     self_update()
+    claim_leadership()
     os.makedirs(WS, exist_ok=True)
     save_cfg(CFG)
     try:
@@ -1374,6 +1520,8 @@ def run():
     threading.Thread(target=scan_loop, daemon=True).start()
     print(f"MELTY Companion {VERSION} connected to {CFG['server']}. Allowed ops: {', '.join(CFG['allowed_ops'])}")
     while True:
+        if not is_leader():
+            sys.exit("A newer MELTY Companion was started on this PC, so this older one has stopped. You can close this window.")
         try:
             job = http("GET", "/api/companion/jobs/next").get("job")
         except Exception as e:

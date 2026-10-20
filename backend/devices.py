@@ -483,6 +483,12 @@ async def _store_install(did: str, job: dict, res: dict):
             "name": job["params"].get("manifest", {}).get("name"), "host_dir": res.get("host_dir"),
             "files_created": res.get("created", 0), "files_replaced": res.get("replaced", 0),
             "status": "installed", "installed_at": now()}}, upsert=True)
+        # The companion removes the previous copy of the same package before reinstalling (companion 0.5.2+).
+        old = [i for i in (res.get("replaced_installs") or []) if isinstance(i, str)]
+        if old:
+            await db.installs.update_many({"install_id": {"$in": old}, "device_id": did},
+                                          {"$set": {"status": "restored", "restored_at": now(),
+                                                    "restore_report": {"reason": "replaced by reinstall", "by": res.get("install_id")}}})
     else:
         await db.installs.update_one({"install_id": job["params"].get("install_id")},
                                      {"$set": {"status": "restored", "restored_at": now(),

@@ -17,6 +17,7 @@ import suggestions
 import workshop
 import trainer
 import playtest
+from luasyntax import lua_syntax_errors
 from assets import put_object, get_object, APP_NAME, init_storage
 
 app = FastAPI()
@@ -321,6 +322,9 @@ async def save_file(pid: str, b: FileIn):
 async def build_now(pid: str):
     m = await get_mod(pid)
     await adapters.reject_unverified_host(m["host"], m.get("device_id"))
+    syntax, _note = lua_syntax_errors(m.get("files") or [], m.get("toolchain"))
+    if syntax:
+        raise HTTPException(400, "Lua syntax errors, fix these before building: " + " | ".join(syntax[:10]))
     d = await devices.online_device(m.get("device_id"))
     if not d:
         raise HTTPException(409, "No companion online")

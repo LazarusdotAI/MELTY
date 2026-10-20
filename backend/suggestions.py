@@ -95,6 +95,7 @@ async def suggestions(device_id: str):
 class PitchIn(BaseModel):
     device_id: str
     keys: list
+    fresh: bool = False
 
 
 PITCH_SYSTEM = """You pitch small, feasible crossover mods. For each pair: the HOST game runs; the SECOND game lends assets (if role asset-source) or mechanics (re-implemented).
@@ -108,6 +109,11 @@ async def pitch(b: PitchIn):
     pairs = [sug[k] for k in b.keys[:6] if k in sug]
     if not pairs:
         raise HTTPException(400, "No matching suggestions")
+    if not b.fresh:  # pitches are saved per pair; only pay for pairs that don't have one yet
+        have = {p["key"] async for p in db.pitches.find({"device_id": b.device_id, "key": {"$in": [x["key"] for x in pairs]}}, {"key": 1})}
+        pairs = [p for p in pairs if p["key"] not in have]
+        if not pairs:
+            return {"count": 0, "cost": 0.0, "model": "saved ideas (no AI call needed)"}
     ctx = json.dumps([{"key": p["key"], "host": p["host"]["name"], "second": p["secondary"]["name"],
                        "role": p["secondary"]["role"]} for p in pairs])
     try:

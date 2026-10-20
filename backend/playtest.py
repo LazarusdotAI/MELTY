@@ -41,7 +41,7 @@ async def play_state(pid: str):
     lc = m.get("last_confirm") or {}
     v = m.get("verification") or {}
     loaded = bool(lc.get("loaded") or (v.get("checks") or {}).get("plugin_loaded"))
-    stage = "confirmed" if m.get("build_status") == "verified" else "loaded" if inst and loaded else "installed" if inst \
+    stage = "confirmed" if inst and m.get("build_status") == "verified" else "loaded" if inst and loaded else "installed" if inst \
         else "built" if m.get("last_build_job_id") else "planned"
     return {"stage": stage, "installed": bool(inst), "install_id": (inst or {}).get("install_id"), "built": bool(m.get("last_build_job_id")),
             "status": m.get("build_status"), "feature_checks": m.get("feature_checks") or [], "checking": lc.get("state") == "checking" and (lc.get("since") or "") > (datetime.now(timezone.utc) - timedelta(minutes=11)).isoformat(),
@@ -69,9 +69,11 @@ async def _finish_check(pid, jid):
     m = await db.mods.find_one({"id": pid}, {"_id": 0, "files": 0})
     r = j.get("result") or {}
     checks = r.get("checks") or []
-    names = m.get("feature_checks") or sorted({c["name"] for c in checks})
-    feats = feature_results(names, checks)
-    ok = j["status"] == "done" and confirmed(names, checks)
+    # Never fall back to "whatever checks the mod printed": the list must come from the user's request (modagent QA step).
+    required = bool(m.get("required_checks"))
+    names = m.get("feature_checks") or []
+    feats = feature_results(names or sorted({c["name"] for c in checks}), checks)
+    ok = j["status"] == "done" and required and confirmed(names, checks)
     await db.mods.update_one({"id": pid}, {"$set": {"last_confirm": {"state": "done", "at": now(), "features": feats, "ok": ok,
                                                                      "log_tail": (r.get("log_tail") or "")[-6000:], "loaded": bool(r.get("mod_loaded"))},
                                                     "build_status": "verified" if ok else ("built" if m.get("build_status") == "verified" else m.get("build_status"))}})
@@ -81,6 +83,9 @@ async def _finish_check(pid, jid):
         txt = "I couldn't read the game's log from your PC. Make sure MELTY Companion is running and try again."
     elif "checks" not in r:
         txt = "Your PC's MELTY Companion is too old to read the game's log. Close it and start it again from the desktop shortcut — it updates itself — then check again."
+    elif not required:
+        txt = ("This mod doesn't have its list of features to prove yet, so I can't confirm it. Ask Copilot for a small change "
+               "(or to rebuild it) and it will make the list from your request, then check again.")
     elif not checks:
         txt = "I didn't find any sign of the mod in the game's log. Start the game with the mod installed, play a bit, then check again."
     elif ok:

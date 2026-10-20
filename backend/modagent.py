@@ -14,6 +14,7 @@ import adapters
 import workshop
 from assets import get_object
 from devices import enqueue, wait_job, online_device
+from luasyntax import lua_syntax_errors, engine_name
 
 MAX_TURNS = 18
 MAX_BUILDS = 5
@@ -271,6 +272,14 @@ async def run_tool(name, args, ws, mod, state):
         if name == "build":
             if state["builds"] >= MAX_BUILDS:
                 return "ERROR: build budget exhausted; finish and report remaining errors."
+            tc = mod.get("toolchain") or "bepinex5-csharp"
+            syntax, note = lua_syntax_errors(ws.as_list(), tc)
+            if syntax:
+                await log(gid, f"Build stopped: {len(syntax)} Lua syntax error(s) found before sending it to your PC", "test_fail")
+                return json.dumps({"ok": False, "status": "syntax_error", "error": f"Lua syntax errors ({engine_name(tc)}, the game's own Lua)",
+                                   "errors": syntax[:40], "warnings": 0, "log_tail": ""})
+            if note:
+                await log(gid, note, "warn")
             state["builds"] += 1
             await log(gid, f"Build #{state['builds']} dispatched to companion…", "test")
             j, err = await dispatch(mod, gid, "build_mod", build_params(mod, ws), 420, f"Build {mod['title']}")
@@ -330,7 +339,7 @@ async def run_tool(name, args, ws, mod, state):
 def shrink(storage_path: str) -> str:
     data, _ = get_object(storage_path)
     im = Image.open(io.BytesIO(data)).convert("RGB")
-    im.thumbnail((1280, 720))
+    im.thumbnail((1024, 576))  # image tokens grow with pixels; 1024 wide still shows missing textures, UI overlap and error dialogs
     out = io.BytesIO()
     im.save(out, "JPEG", quality=70)
     return "data:image/jpeg;base64," + base64.b64encode(out.getvalue()).decode()
@@ -394,6 +403,110 @@ def confirmed(names, checks):
     return bool(names) and all(r["pass"] for r in feature_results(names, checks))
 
 
+QA_SYSTEM = """You are MELTY's independent QA lead. You never see the code and you don't write it.
+From the user's request only, list the features the player must be able to see or feel in the game before the mod may be called done.
+Return only JSON: {"checks": [{"name": "snake_case_name", "what": "one plain sentence: what must observably happen in the game"}]}
+Rules: 1 to 8 checks, one per distinct requested feature. Names are 3-40 characters of a-z, 0-9 and _.
+Never list 'loaded', 'installed', 'no_errors' or anything that is true before the feature runs.
+If PREVIOUS CHECKS are given, this is a change request: keep the previous checks the user still wants, drop the ones the request removes, add the new ones, and return the full list."""
+CHECK_NAME = re.compile(r"^[a-z][a-z0-9_]{2,39}$")
+NOT_FEATURES = {"loaded", "installed", "no_errors", "mod_loaded", "ready", "melty_ready"}
+
+
+def parse_checks(text):
+    m = re.search(r"\{.*\}", text or "", re.S)
+    try:
+        data = json.loads(m.group(0)) if m else {}
+    except json.JSONDecodeError:
+        return []
+    out, seen = [], set()
+    for c in (data.get("checks") if isinstance(data, dict) else None) or []:
+        if not isinstance(c, dict):
+            continue
+        n = re.sub(r"[^a-z0-9_]+", "_", str(c.get("name", "")).strip().lower()).strip("_")
+        if CHECK_NAME.match(n) and n not in seen and n not in NOT_FEATURES:
+            seen.add(n)
+            out.append({"name": n, "what": str(c.get("what", "")).strip()[:200]})
+    return out[:8]
+
+
+def feature_check_names(required, extra):
+    names = list(required)
+    for n in extra or []:
+        if isinstance(n, str) and n not in names:
+            names.append(n)
+    return names[:20]
+
+
+def required_checks_text(checks):
+    if not checks:
+        return ""
+    lines = "\n".join(f"- {c['name']}: {c['what']}" for c in checks)
+    return ("\n\nREQUIRED CHECKS (set by MELTY's QA step from the user's own request; you can't change them). Print a "
+            "`MELTY_CHECK <name> PASS|FAIL <detail>` line with exactly each of these names, PASS only after the effect really "
+            "happened and was read back. You may add more checks in finish.feature_checks, but these all must pass:\n" + lines)
+
+
+async def plan_required_checks(gid, mod, request):
+    """Derive the checks from the request in a separate call that never sees the code, so the coder can't pick easy ones."""
+    previous = mod.get("required_checks") or []
+    prev = "\nPREVIOUS CHECKS:\n" + "\n".join(f"- {c['name']}: {c['what']}" for c in previous) if previous else ""
+    try:
+        r = await paid_call(gid, mod["id"], [{"role": "system", "content": QA_SYSTEM},
+                                             {"role": "user", "content": f"GAME: {mod['host']['name']}\nUSER REQUEST:\n{request}{prev}"}],
+                            None, 800, "independent feature checks")
+        checks = parse_checks(r["message"].get("content"))
+    except BudgetExceeded:
+        raise
+    except Exception as e:
+        logger.warning("feature check planning failed: %s", e)
+        checks = []
+    if not checks:
+        await log(gid, "Couldn't make the independent feature list" + ("; keeping the previous one" if previous else ""), "warn")
+        return previous
+    await log(gid, "Features that must be proven in the game: " + ", ".join(c["name"] for c in checks), "step")
+    return checks
+
+
+TRIM_OVER = 800   # chars; older tool results / tool-call arguments longer than this get shrunk
+TRIM_KEEP = 400
+
+
+def compact(messages):
+    """Every turn resends the whole history, so bulky old content is paid for again and again. Shrink everything
+    before the last two assistant turns, in place: once shrunk it never changes again, which keeps the provider's
+    prompt cache valid for the older prefix. Nothing is lost for good: files stay in the project (read_file) and
+    tools can be called again."""
+    turns = [i for i, m in enumerate(messages) if m.get("role") == "assistant"]
+    if len(turns) < 3:
+        return 0
+    saved = 0
+    for m in messages[2:turns[-2]]:
+        role, c = m.get("role"), m.get("content")
+        if role == "tool" and isinstance(c, str) and len(c) > TRIM_OVER:
+            m["content"] = c[:TRIM_KEEP] + f"\n…[{len(c) - TRIM_KEEP} more chars trimmed to save tokens; call the tool again if you need them]"
+            saved += len(c) - len(m["content"])
+        elif role == "user" and isinstance(c, list):
+            m["content"] = " ".join(x.get("text", "") for x in c if x.get("type") == "text") + " [screenshot removed after its review to save tokens]"
+            saved += 4000
+        elif role == "assistant":
+            for tc in m.get("tool_calls") or []:
+                fn = tc.get("function") or {}
+                a = fn.get("arguments") or ""
+                if len(a) <= TRIM_OVER:
+                    continue
+                try:
+                    args = json.loads(a)
+                except json.JSONDecodeError:
+                    continue
+                for k in ("content", "old", "new"):
+                    if isinstance(args.get(k), str) and len(args[k]) > 200:
+                        args[k] = f"<{len(args[k])} chars; saved in the project, use read_file to see the current file>"
+                fn["arguments"] = json.dumps(args)
+                saved += len(a) - len(fn["arguments"])
+    return saved
+
+
 async def agent_loop(gid, mod, task):
     ws = WS(gid, mod.get("files", []))
     await ws.persist()
@@ -414,6 +527,7 @@ async def agent_loop(gid, mod, task):
                 await log(gid, "Saw your new message — it's queued and will start after this job", "info")
         if turn == MAX_TURNS - 2:
             messages.append({"role": "user", "content": "Only 2 turns left: call finish now with an honest summary and the full spec."})
+        compact(messages)
         r = await paid_call(gid, mod["id"], messages, TOOLS, int(os.environ["MAX_OUTPUT_TOKENS"]), f"coding turn {turn + 1}")
         msg = r["message"]
         messages.append(msg)
@@ -462,10 +576,15 @@ async def finalize(gid, mod, ws, state, fin, name, kind):
     fresh = state.get("build_hash") == files_hash(ws.as_list())
     built = bool(b and (b.get("result") or {}).get("ok")) and fresh
     v = state.get("verification") if fresh and state.get("verification_hash") == state.get("build_hash") else None
-    names = [n for n in (fin or {}).get("feature_checks") or [] if isinstance(n, str)][:20]
-    proven = bool(v and v["passed"] and confirmed(names, v.get("melty_checks")))
+    required = [c["name"] for c in mod.get("required_checks") or []]
+    names = feature_check_names(required, (fin or {}).get("feature_checks"))
+    # Only the independent list (from the user's request) can make a mod "verified"; the coder's own extras add to it.
+    proven = bool(required and v and v["passed"] and confirmed(names, v.get("melty_checks")))
+    if not required:
+        await log(gid, "No independent feature list was made for this request, so it can't be marked verified", "warn")
     status = "verified" if proven else ("built" if built else "unbuilt")
-    upd = {"files": ws.as_list(), "verification": v, "build_status": status, "updated_at": now(), "feature_checks": names, "last_confirm": None,
+    upd = {"files": ws.as_list(), "verification": v, "build_status": status, "updated_at": now(), "feature_checks": names,
+           "required_checks": mod.get("required_checks") or [], "last_confirm": None,
            "last_build_job_id": b["id"] if built else None, "build_hash": state.get("build_hash") if built else None}
     if fin and fin.get("spec_md"):
         upd["spec_md"] = fin["spec_md"]
@@ -525,6 +644,8 @@ async def run(gid, pid, request, kind):
             lc = mod.get("last_confirm")
             if lc:
                 task += f"\n\nLAST TIME THE USER PLAYED (from the game's own log): features {json.dumps(lc.get('features'))}\nLOG TAIL:\n{(lc.get('log_tail') or '')[-3000:]}"
+        mod["required_checks"] = await plan_required_checks(gid, mod, mod["description"] if kind == "create" else request)
+        task += required_checks_text(mod["required_checks"])
         ws, state, fin = await agent_loop(gid, mod, task)
         await finalize(gid, mod, ws, state, fin, ("Created: " if kind == "create" else "Edit: ") + (request or mod["title"])[:60], kind)
     except BudgetExceeded as e:
